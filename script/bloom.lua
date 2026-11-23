@@ -1,10 +1,3 @@
-
--- =========================================================
--- SPIRITS HUNTER HUB ULTIMATE (DIMENSIUI EDITION)
--- UI: DimensiUI | Theme: Dimensi (Dark Purple)
--- Author / Credit: telatnakal
--- =========================================================
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
@@ -16,9 +9,16 @@ local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local DimensiUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/telatnakal/DimensiUI/main/dist/main.lua"
-))()
+local DIMENSIUI_URL = "https://raw.githubusercontent.com/eko-sulistyawan/DimensiUI/refs/heads/main/dist/main.lua"
+local function loadDimensiUI()
+    local source = game:HttpGet(DIMENSIUI_URL)
+    local compiler = loadstring
+    assert(type(compiler) == "function", "Executor does not support loadstring")
+    local chunk, compileError = compiler(source)
+    assert(type(chunk) == "function", tostring(compileError or "Unable to compile DimensiUI"))
+    return chunk()
+end
+local DimensiUI = loadDimensiUI()
 
 local Spirits = workspace:WaitForChild("Spirits", 30)
 local Orbs = workspace:FindFirstChild("SparkOrbs") or workspace:FindFirstChild("Orbs")
@@ -27,10 +27,6 @@ if not Spirits then
     warn("Folder Spirits tidak ditemukan.")
     return
 end
-
--- =========================================================
--- CONFIGURATION
--- =========================================================
 
 local CONFIG = {
     Speed = 35,
@@ -67,18 +63,14 @@ local CONFIG_FARM = {
 }
 
 local CONFIG_ALLIN = {
-    MinEnergyThreshold = 100,     -- Batas bawah: Di bawah 100 mulai cari Orb/Spirit
-    TargetEnergy = 2000,          -- Batas atas: Jika sudah >= 2000, kembali ke Auto Farm
-    SwitchInterval = 240,         -- Interval 240 detik (4 menit) switch & refresh Orb/Spirit
+    MinEnergyThreshold = 100,
+    TargetEnergy = 2000,
+    SwitchInterval = 240,
 }
 
--- =========================================================
--- STATE
--- =========================================================
-
 local State = {
-    playerESP = true,
-    spiritESP = true,
+    playerESP = false,
+    spiritESP = false,
 
     autoSpirit = false,
     autoOrb = false,
@@ -124,8 +116,8 @@ local StateFarm = {
 
 local StateAllIn = {
     autoAllInToggle = false,
-    mode = "IDLE",                -- "IDLE", "SEARCHING", atau "FARMING"
-    searchType = "ORB",           -- "ORB" atau "SPIRIT"
+    mode = "IDLE",
+    searchType = "ORB",
     timerStart = 0,
 }
 
@@ -134,9 +126,72 @@ local PACE = {
     normal = CONFIG.NormalSpeed,
 }
 
-local Connections = {}
+local EventManager = { Connections = {} }
+local Connections = EventManager.Connections
+local ModuleManager = { Modules = {} }
+local ErrorHandler = {}
+local onModuleError
+local logActivity
+local MovementLock = { Owner = "IDLE", Generation = 0 }
 local speedHooked
 local speedConn
+
+function ErrorHandler.Run(moduleName, callback, ...)
+    if type(callback) ~= "function" then return false end
+    local args = table.pack(...)
+    local traceback = (debug and debug.traceback) or function(message)
+        return tostring(message)
+    end
+    local results = table.pack(xpcall(function()
+        return callback(table.unpack(args, 1, args.n))
+    end, traceback))
+    if not results[1] then
+        logActivity("ERROR", tostring(moduleName) .. ": " .. tostring(results[2]))
+        warn("[DIMENSI-HUB][" .. tostring(moduleName) .. "] " .. tostring(results[2]))
+        if onModuleError then pcall(onModuleError, moduleName) end
+        return false
+    end
+    return true, table.unpack(results, 2, results.n)
+end
+
+function ModuleManager:Register(name, module)
+    if type(name) ~= "string" or type(module) ~= "table" then return false end
+    self.Modules[name] = module
+    return true
+end
+
+function ModuleManager:Get(name)
+    return self.Modules[name]
+end
+
+function MovementLock:Acquire(owner)
+    owner = tostring(owner or "IDLE")
+    if self.Owner ~= owner then
+        self.Owner = owner
+        self.Generation += 1
+    end
+    return true
+end
+
+function MovementLock:Allows(owner)
+    if self.Owner == owner then return true end
+    if self.Owner == "ALL_IN" and owner == "ALL_IN" then return true end
+    return false
+end
+
+function EventManager:Connect(signal, callback)
+    if not signal or type(callback) ~= "function" then return nil end
+    local connection = signal:Connect(callback)
+    table.insert(self.Connections, connection)
+    return connection
+end
+
+function EventManager:DisconnectAll()
+    for _, connection in ipairs(self.Connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(self.Connections)
+end
 
 local function trackConnection(conn)
     if conn then
@@ -144,10 +199,6 @@ local function trackConnection(conn)
     end
     return conn
 end
-
--- =========================================================
--- TIER CONFIGURATION
--- =========================================================
 
 local TierNames = {
     [1] = "COMMON",
@@ -176,9 +227,316 @@ local TierFilter = {
     COMMON = false,
 }
 
--- =========================================================
--- ESP STORAGE
--- =========================================================
+local DEFAULT_SETTINGS = {
+    Speed = 35,
+    NormalSpeed = 16,
+    PlayerESP = false,
+    SpiritESP = false,
+    SpeedBoost = false,
+    ManualNoClip = false,
+    FPSBoost = false,
+    AntiAFK = false,
+    TierFilter = {
+        MYTHIC = true,
+        EPIC = true,
+        RARE = true,
+        UNCOMMON = false,
+        COMMON = false,
+    },
+    Movement = {
+        MoveInterval = 0.12,
+        MoveOrderInterval = 0.15,
+        OrbReached = 5,
+        SpiritReached = 5,
+        OrbZoneSize = 120,
+        OrbCooldown = 20,
+        OrbBlockedTime = 10,
+        OrbJumpHeight = 2.5,
+        OrbJumpDistance = 24,
+        OrbJumpCooldown = 0.9,
+        StuckLimit = 7,
+        StuckCheckInterval = 1,
+        StuckMinMovement = 1.2,
+    },
+    Farm = {
+        InteractDistance = 3.5,
+        ScanInterval = 0.5,
+        PotDelay = 0.8,
+        PlantRetryDelay = 1,
+        PlantRetries = 2,
+        BaseReturnDistance = 25,
+        MoveOrderInterval = 0.65,
+        KeyPressDuration = 0.25,
+    },
+    AllIn = {
+        MinEnergyThreshold = 100,
+        TargetEnergy = 2000,
+        SwitchInterval = 240,
+    },
+}
+
+local ConfigLanguage = "en"
+local ActivityLog = {}
+local ACTIVITY_LOG_LIMIT = 80
+
+logActivity = function(category, message)
+    local entry = {
+        Time = os.date("%H:%M:%S"),
+        Category = tostring(category or "SYSTEM"),
+        Message = tostring(message or ""),
+    }
+    table.insert(ActivityLog, 1, entry)
+    while #ActivityLog > ACTIVITY_LOG_LIMIT do
+        table.remove(ActivityLog)
+    end
+    print(string.format("[DIMENSI-HUB][%s][%s] %s", entry.Time, entry.Category, entry.Message))
+end
+
+local function getActivityLogText(limit)
+    local lines = {}
+    local count = math.min(#ActivityLog, limit or 18)
+    for index = 1, count do
+        local entry = ActivityLog[index]
+        lines[#lines + 1] = string.format("[%s] [%s] %s", entry.Time, entry.Category, entry.Message)
+    end
+    if #lines == 0 then
+        return ConfigLanguage == "id" and "Belum ada aktivitas." or "No activity recorded."
+    end
+    return table.concat(lines, "\n")
+end
+
+local function resetConfigData()
+    PACE.boost = DEFAULT_SETTINGS.Speed
+    PACE.normal = DEFAULT_SETTINGS.NormalSpeed
+
+    State.playerESP = DEFAULT_SETTINGS.PlayerESP
+    State.spiritESP = DEFAULT_SETTINGS.SpiritESP
+    State.speedBoost = DEFAULT_SETTINGS.SpeedBoost
+    State.manualNoClip = DEFAULT_SETTINGS.ManualNoClip
+    State.fpsBoost = DEFAULT_SETTINGS.FPSBoost
+    State.antiAFK = DEFAULT_SETTINGS.AntiAFK
+
+    for key, value in pairs(DEFAULT_SETTINGS.Movement) do CONFIG[key] = value end
+    for key, value in pairs(DEFAULT_SETTINGS.Farm) do CONFIG_FARM[key] = value end
+    for key, value in pairs(DEFAULT_SETTINGS.AllIn) do CONFIG_ALLIN[key] = value end
+
+    table.clear(TierFilter)
+    for key, value in pairs(DEFAULT_SETTINGS.TierFilter) do TierFilter[key] = value end
+
+    State.autoOrb = false
+    State.autoSpirit = false
+    StateFarm.autoFarmToggle = false
+    StateAllIn.autoAllInToggle = false
+    StateAllIn.mode = "IDLE"
+    StateAllIn.searchType = "ORB"
+    State.manualNoClip = false
+    State.autoNoClip = false
+    State.noClip = false
+    State.currentOrb = nil
+    State.currentSpirit = nil
+    table.clear(State.visitedOrbs)
+    table.clear(State.blockedOrbs)
+    table.clear(State.zoneHistory)
+    ConfigLanguage = "en"
+
+    logActivity("CONFIG", "Configuration reset to defaults.")
+end
+
+local CONFIG_FOLDER = "/workspace/DimensiHUB/Bloom"
+local CONFIG_FILE = CONFIG_FOLDER .. "/setting.json"
+local ConfigReady = false
+local ConfigLoaded = false
+local ConfigSaveToken = 0
+local ConfigDirty = false
+local LastSavedConfig = nil
+local TEXT = {
+    en = {
+        Home = "Home", Farming = "Farming", Visual = "Visual", Misc = "Misc", About = "About",
+        CharacterProfile = "Character Profile", PlayerLabel = "Player", SystemOverview = "System Overview",
+        SystemStatusLabel = "System Status", PlayerESPSection = "Player ESP", SpiritESPSection = "Spirit ESP",
+        PlayerESPLabel = "Player ESP", SpiritESPLabel = "Spirit ESP", SpiritTierLabel = "Spirit Tier Filter",
+        PotManagement = "Pot Management", OrbSpiritSection = "Orb & Spirit", AllInSection = "Auto All-In System",
+        AutoFarmLabel = "Auto Farm Pots", AutoOrbLabel = "Auto Collect Orbs", AutoSpiritLabel = "Auto Hunt Spirits",
+        AutoAllInLabel = "Auto All-In", AutoAllInStatus = "Auto All-In Status", CharacterSection = "Character",
+        SpeedBoostLabel = "Speed Boost", NoclipLabel = "Noclip", PerformanceSection = "Performance",
+        FPSBoostLabel = "FPS Boost", AntiAFKLabel = "Anti-AFK", SessionSection = "Session",
+        ServerHopLabel = "Server Hop", RejoinLabel = "Rejoin Server", HubControlsLabel = "Hub Controls",
+        StopAllLabel = "Stop All", ResetConfigLabel = "Reset Configuration", UnloadLabel = "Unload Hub",
+        Language = "Language", Configuration = "Configuration", AboutDescription = "Version 1.0.1\nAuthor: telatnakal",
+        SchedulerLabel = "Automation Monitor", ScannerStatusLabel = "Target Scanner",
+        ActivityLogLabel = "Recent Activity", NoActivity = "No activity recorded.",
+        TargetRefreshLabel = "Target Refresh", EnergyLabel = "Energy", RecoveriesLabel = "Recoveries",
+        OwnerLabel = "Owner", HealthLabel = "Health", PositionLabel = "Position", SchedulerShort = "Scheduler",
+        ScansLabel = "Scans", OrbLabel = "Orb", SpiritLabel = "Spirit", MemoryLabel = "Memory",
+        LoadingCharacter = "Loading character...", Unavailable = "Unavailable", None = "None",
+        StatusOff = "Status: OFF | Energy: %d (Search < %d, Farm >= %d)",
+        AllInFarmingStatus = "Mode: AUTO FARM | Energy: %d / %d (Search again below %d)",
+        AllInSearchingStatus = "Mode: SEARCH %s | Energy: %d / %d | Refresh/Switch: %ds",
+        AllInIdleStatus = "Mode: IDLE | Energy: %d",
+        NotifyLoaded = "Loaded successfully. Press RightControl to toggle the interface.",
+        NotifyFarmOn = "Auto Farm Pots enabled.", NotifyFarmOff = "Auto Farm Pots disabled.",
+        NotifyOrbOn = "Auto Collect Orbs enabled.", NotifyOrbOff = "Auto Collect Orbs disabled.",
+        NotifySpiritOn = "Auto Hunt Spirits enabled.", NotifySpiritOff = "Auto Hunt Spirits disabled.",
+        NotifyAllInOn = "Auto All-In enabled.", NotifyAllInOff = "Auto All-In disabled.",
+        NotifyCacheRefreshed = "Target cache refreshed.", NotifyReset = "Configuration reset to defaults.",
+        NotifySearchingServers = "Searching for another server...", NotifySwitchingServer = "Joining another server...",
+        NotifyNoServer = "No other server found. Trying to rejoin...", NotifyServerFailed = "Unable to retrieve the server list.",
+        AllInLowEnergy = "Energy below %d (%d). Searching for Orbs; refresh every %ds.",
+        AllInReached = "Energy target %d reached. Returning to Auto Farm.",
+        AllInSwitchSpirit = "Interval %ds: refreshed targets; switching to Spirit search.",
+        AllInSwitchOrb = "Interval %ds: refreshed targets; switching to Orb search.",
+        AutoFarm = "Auto Farm", Orb = "Orb", Spirit = "Spirit", AutoAllIn = "Auto All-In",
+        ServerHop = "Server Hop", Targets = "Targets", ConfigurationTitle = "Configuration",
+    },
+    id = {
+        Home = "Beranda", Farming = "Farming", Visual = "Visual", Misc = "Lainnya", About = "Tentang",
+        CharacterProfile = "Profil Karakter", PlayerLabel = "Pemain", SystemOverview = "Ringkasan Sistem",
+        SystemStatusLabel = "Status Sistem", PlayerESPSection = "ESP Pemain", SpiritESPSection = "ESP Spirit",
+        PlayerESPLabel = "ESP Pemain", SpiritESPLabel = "ESP Spirit", SpiritTierLabel = "Filter Tier Spirit",
+        PotManagement = "Pengelolaan Pot", OrbSpiritSection = "Orb & Spirit", AllInSection = "Sistem Auto All-In",
+        AutoFarmLabel = "Auto Farm Pot", AutoOrbLabel = "Auto Kumpulkan Orb", AutoSpiritLabel = "Auto Berburu Spirit",
+        AutoAllInLabel = "Auto All-In", AutoAllInStatus = "Status Auto All-In", CharacterSection = "Karakter",
+        SpeedBoostLabel = "Peningkat Kecepatan", NoclipLabel = "Noclip", PerformanceSection = "Performa",
+        FPSBoostLabel = "Peningkat FPS", AntiAFKLabel = "Anti-AFK", SessionSection = "Sesi",
+        ServerHopLabel = "Pindah Server", RejoinLabel = "Masuk Ulang Server", HubControlsLabel = "Kontrol Hub",
+        StopAllLabel = "Hentikan Semua", ResetConfigLabel = "Reset Konfigurasi", UnloadLabel = "Tutup Hub",
+        Language = "Bahasa", Configuration = "Konfigurasi", AboutDescription = "Versi 1.0.1\nAuthor: telatnakal",
+        SchedulerLabel = "Monitor Otomatisasi", ScannerStatusLabel = "Pemindai Target",
+        ActivityLogLabel = "Aktivitas Terbaru", NoActivity = "Belum ada aktivitas.",
+        TargetRefreshLabel = "Penyegaran Target", EnergyLabel = "Energi", RecoveriesLabel = "Pemulihan",
+        OwnerLabel = "Pengendali", HealthLabel = "Kesehatan", PositionLabel = "Posisi", SchedulerShort = "Scheduler",
+        ScansLabel = "Pemindaian", OrbLabel = "Orb", SpiritLabel = "Spirit", MemoryLabel = "Memori",
+        LoadingCharacter = "Memuat karakter...", Unavailable = "Tidak tersedia", None = "Tidak ada",
+        StatusOff = "Status: OFF | Energi: %d (Cari < %d, Farm >= %d)",
+        AllInFarmingStatus = "Mode: AUTO FARM | Energi: %d / %d (Cari lagi jika < %d)",
+        AllInSearchingStatus = "Mode: CARI %s | Energi: %d / %d | Refresh/Switch: %ds",
+        AllInIdleStatus = "Mode: IDLE | Energi: %d",
+        NotifyLoaded = "Berhasil dimuat. Tekan RightControl untuk membuka atau menutup antarmuka.",
+        NotifyFarmOn = "Auto Farm Pot diaktifkan.", NotifyFarmOff = "Auto Farm Pot dinonaktifkan.",
+        NotifyOrbOn = "Auto Kumpulkan Orb diaktifkan.", NotifyOrbOff = "Auto Kumpulkan Orb dinonaktifkan.",
+        NotifySpiritOn = "Auto Berburu Spirit diaktifkan.", NotifySpiritOff = "Auto Berburu Spirit dinonaktifkan.",
+        NotifyAllInOn = "Auto All-In diaktifkan.", NotifyAllInOff = "Auto All-In dinonaktifkan.",
+        NotifyCacheRefreshed = "Cache target diperbarui.", NotifyReset = "Konfigurasi dikembalikan ke pengaturan awal.",
+        NotifySearchingServers = "Mencari server lain...", NotifySwitchingServer = "Beralih ke server lain...",
+        NotifyNoServer = "Server lain tidak ditemukan. Mencoba masuk ulang...", NotifyServerFailed = "Gagal mengambil daftar server.",
+        AllInLowEnergy = "Energi di bawah %d (%d). Mencari Orb; refresh setiap %ds.",
+        AllInReached = "Target energi %d tercapai. Kembali ke Auto Farm.",
+        AllInSwitchSpirit = "Interval %ds: target diperbarui; beralih mencari Spirit.",
+        AllInSwitchOrb = "Interval %ds: target diperbarui; beralih mencari Orb.",
+        AutoFarm = "Auto Farm", Orb = "Orb", Spirit = "Spirit", AutoAllIn = "Auto All-In",
+        ServerHop = "Pindah Server", Targets = "Target", ConfigurationTitle = "Konfigurasi",
+    }
+}
+local function T(key)
+    return (TEXT[ConfigLanguage] and TEXT[ConfigLanguage][key]) or (TEXT.en and TEXT.en[key]) or key
+end
+
+local function getConfigSnapshot()
+    return {
+        Language = ConfigLanguage,
+        Speed = PACE.boost,
+        NormalSpeed = PACE.normal,
+        PlayerESP = State.playerESP,
+        SpiritESP = State.spiritESP,
+        SpeedBoost = State.speedBoost,
+        ManualNoClip = State.manualNoClip,
+        FPSBoost = State.fpsBoost,
+        AntiAFK = State.antiAFK,
+        AutoFarm = StateFarm.autoFarmToggle,
+        AutoOrb = State.autoOrb,
+        AutoSpirit = State.autoSpirit,
+        AutoAllIn = StateAllIn.autoAllInToggle,
+        TierFilter = table.clone(TierFilter),
+        Movement = table.clone(CONFIG),
+        Farm = table.clone(CONFIG_FARM),
+        AllIn = table.clone(CONFIG_ALLIN),
+    }
+end
+
+local function applyConfigSnapshot(data)
+    if type(data) ~= "table" then return false end
+    if data.Language == "id" or data.Language == "en" then ConfigLanguage = data.Language end
+    if type(data.Speed) == "number" then PACE.boost = math.clamp(data.Speed, 16, 200) end
+    if type(data.NormalSpeed) == "number" then PACE.normal = math.clamp(data.NormalSpeed, 1, 100) end
+    for key, field in pairs({PlayerESP="playerESP", SpiritESP="spiritESP", SpeedBoost="speedBoost", ManualNoClip="manualNoClip", FPSBoost="fpsBoost", AntiAFK="antiAFK"}) do
+        if type(data[key]) == "boolean" then State[field] = data[key] end
+    end
+    StateFarm.autoFarmToggle = data.AutoFarm == true
+    State.autoOrb = data.AutoOrb == true
+    State.autoSpirit = data.AutoSpirit == true
+    StateAllIn.autoAllInToggle = data.AutoAllIn == true
+    if StateFarm.autoFarmToggle then State.autoOrb, State.autoSpirit, StateAllIn.autoAllInToggle = false, false, false end
+    if State.autoOrb then State.autoSpirit, StateFarm.autoFarmToggle, StateAllIn.autoAllInToggle = false, false, false end
+    if State.autoSpirit then State.autoOrb, StateFarm.autoFarmToggle, StateAllIn.autoAllInToggle = false, false, false end
+    if StateAllIn.autoAllInToggle then State.autoOrb, State.autoSpirit, StateFarm.autoFarmToggle = false, false, false end
+    for key, value in pairs(type(data.Movement) == "table" and data.Movement or {}) do
+        if CONFIG[key] ~= nil and type(value) == "number" then CONFIG[key] = value end
+    end
+    for key, value in pairs(type(data.Farm) == "table" and data.Farm or {}) do
+        if CONFIG_FARM[key] ~= nil and type(value) == "number" then CONFIG_FARM[key] = value end
+    end
+    for key, value in pairs(type(data.AllIn) == "table" and data.AllIn or {}) do
+        if CONFIG_ALLIN[key] ~= nil and type(value) == "number" then CONFIG_ALLIN[key] = value end
+    end
+    if type(data.TierFilter) == "table" then
+        for key in pairs(TierFilter) do
+            if type(data.TierFilter[key]) == "boolean" then TierFilter[key] = data.TierFilter[key] end
+        end
+    end
+    return true
+end
+
+local function ensureConfigFolder()
+    if type(isfolder) ~= "function" or type(makefolder) ~= "function" then return false end
+    pcall(function() if not isfolder("/workspace/DimensiHUB") then makefolder("/workspace/DimensiHUB") end end)
+    pcall(function() if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end end)
+    return true
+end
+
+local function loadConfig()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return false end
+    local ok, result = pcall(function()
+        if not isfile(CONFIG_FILE) then return false end
+        local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        return applyConfigSnapshot(decoded)
+    end)
+    if ok and result then
+        ConfigLoaded = true
+        LastSavedConfig = HttpService:JSONEncode(getConfigSnapshot())
+        ConfigDirty = false
+        return true
+    end
+    return false
+end
+
+local function saveConfig()
+    if not ConfigReady or not ConfigDirty or type(writefile) ~= "function" then return false end
+    if not ensureConfigFolder() then return false end
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(getConfigSnapshot()) end)
+    if not ok then return false end
+    if encoded == LastSavedConfig then
+        ConfigDirty = false
+        return true
+    end
+    local saved = pcall(function() writefile(CONFIG_FILE, encoded) end)
+    if saved then
+        LastSavedConfig = encoded
+        ConfigDirty = false
+    end
+    return saved
+end
+
+local function scheduleConfigSave()
+    if not ConfigReady then return end
+    ConfigDirty = true
+    ConfigSaveToken += 1
+    local token = ConfigSaveToken
+    task.delay(1, function()
+        if token == ConfigSaveToken and not State.unloaded then saveConfig() end
+    end)
+end
+
+loadConfig()
 
 local ESPFolder = Instance.new("Folder")
 ESPFolder.Name = "SpiritsHunterESP"
@@ -187,16 +545,30 @@ ESPFolder.Parent = PlayerGui
 local PlayerCache = {}
 local SpiritCache = {}
 
--- =========================================================
--- GENERAL FUNCTIONS
--- =========================================================
-
+local NotificationManager = {}
+local NotificationAliases = {
+    ["DIMENSI-HUB | BLOOM"] = "DIMENSI-HUB | BLOOM",
+    ["Auto Farm"] = "AutoFarm", ["Orb"] = "Orb", ["Spirit"] = "Spirit",
+    ["Auto All-In"] = "AutoAllIn", ["Server Hop"] = "ServerHop",
+    ["Targets"] = "Targets", ["Configuration"] = "ConfigurationTitle",
+    ["Auto Farm Pots: ON"] = "NotifyFarmOn", ["Auto Farm Pots: OFF"] = "NotifyFarmOff",
+    ["Auto Collect Orbs Activated"] = "NotifyOrbOn", ["Auto Collect Orbs Stopped"] = "NotifyOrbOff",
+    ["Auto Hunt Spirits Activated"] = "NotifySpiritOn", ["Auto Hunt Spirits Stopped"] = "NotifySpiritOff",
+    ["Fitur Auto All-In diaktifkan."] = "NotifyAllInOn", ["Fitur Auto All-In dimatikan."] = "NotifyAllInOff",
+    ["Target cache refreshed."] = "NotifyCacheRefreshed", ["Configuration reset to defaults."] = "NotifyReset",
+    ["Mencari server lain..."] = "NotifySearchingServers", ["Berpindah ke server baru..."] = "NotifySwitchingServer",
+    ["Tidak ditemukan server lain, mencoba rejoin..."] = "NotifyNoServer", ["Gagal mengambil daftar server!"] = "NotifyServerFailed",
+}
+function NotificationManager:Resolve(value)
+    local key = NotificationAliases[value]
+    return key and T(key) or value
+end
 local function notify(title, content)
     if State.unloaded then return end
     pcall(function()
         DimensiUI:Notify({
-            Title = title,
-            Content = content,
+            Title = NotificationManager:Resolve(title),
+            Content = NotificationManager:Resolve(content),
             Duration = 3,
         })
     end)
@@ -248,10 +620,6 @@ local function getEnergy()
     end
     return 0
 end
-
--- =========================================================
--- ESP CREATION & UPDATE
--- =========================================================
 
 local function makeESP(name, color)
     local billboard = Instance.new("BillboardGui")
@@ -341,10 +709,6 @@ local function updateSpiritESP()
         end
     end
 end
-
--- =========================================================
--- AUTO FARM SYSTEM
--- =========================================================
 
 local function resetFarmState()
     StateFarm.currentBedNumber = 1
@@ -507,6 +871,7 @@ end
 
 local function updateAutoFarm()
     if State.unloaded or StateFarm.busy then return end
+    if MovementLock.Owner ~= "FARM" and not (MovementLock.Owner == "ALL_IN" and StateAllIn.mode == "FARMING") then return end
 
     local root = getRoot()
     local humanoid = getHumanoid()
@@ -613,10 +978,6 @@ local function updateAutoFarm()
         StateFarm.busy = false
     end)
 end
-
--- =========================================================
--- MOVEMENT, ORB & SPIRIT SYSTEMS
--- =========================================================
 
 local connectOrbEvents
 
@@ -787,6 +1148,8 @@ end
 
 local function setSpeedBoost(value)
     State.speedBoost = value
+    scheduleConfigSave()
+    logActivity("SETTING", "Speed boost " .. (value and "enabled" or "disabled"))
     local humanoid = getHumanoid()
     if value then
         watchSpeed(humanoid)
@@ -874,8 +1237,12 @@ local function checkMovementProgress(root, humanoid, target, anchor, isOrb)
     end
 end
 
+local TargetManager
+
 local function updateMovement()
     if State.unloaded then return end
+    if MovementLock.Owner ~= "ORB" and MovementLock.Owner ~= "SPIRIT" and MovementLock.Owner ~= "ALL_IN" then return end
+    if MovementLock.Owner == "ALL_IN" and StateAllIn.mode ~= "SEARCHING" then return end
     local root = getRoot()
     local humanoid = getHumanoid()
     if not root or not humanoid or humanoid.Health <= 0 then return end
@@ -895,6 +1262,7 @@ local function updateMovement()
             State.stuckCheckPosition = nil
         end
         target = State.currentOrb
+        if target then TargetManager:Remember(target, "ORB") end
         isOrbTarget = true
     elseif State.autoSpirit and not State.autoOrb then
         if not State.currentSpirit or not State.currentSpirit.Parent or not isTierAllowed(State.currentSpirit) then
@@ -903,6 +1271,7 @@ local function updateMovement()
             State.stuckCheckPosition = nil
         end
         target = State.currentSpirit
+        if target then TargetManager:Remember(target, "SPIRIT") end
         isOrbTarget = false
     end
 
@@ -946,7 +1315,18 @@ local function updateMovement()
 end
 
 local farmToggle, orbToggle, spiritToggle, allInToggle, allInStatusParagraph
+local schedulerStatusParagraph, activityLogParagraph
+local homeProfileParagraph, homeStatusParagraph, targetStatusParagraph
+local playerESPToggle, spiritESPToggle
+local setFPSBoost, updateAllInStatusUI
+local antiAFKToggle, manualNoClipToggle, speedBoostToggle, fpsBoostToggle
 local syncingAutoToggles = false
+local syncingSettingToggles = false
+local syncSettingToggleUI
+local Window
+local buildUI
+local setLanguage
+local unloadHub
 
 local function syncAutoToggleUI(active)
     if syncingAutoToggles or State.unloaded then return end
@@ -967,9 +1347,326 @@ local function refreshAllInTargets()
     clearOrbCache()
     clearSpiritCache()
     resetMovement()
+    if TargetManager then
+        TargetManager.LastRefresh = os.clock()
+    end
 end
 
-local function updateAllInStatusUI()
+TargetManager = {
+    RefreshInterval = 60,
+    ValidationInterval = 0.5,
+    LastRefresh = 0,
+    LastValidation = 0,
+    Memory = setmetatable({}, { __mode = "k" }),
+    ScanCount = 0,
+}
+
+function TargetManager:Remember(target, targetType)
+    if not target then return end
+    self.Memory[target] = {
+        Type = targetType,
+        LastSeen = os.clock(),
+        LastPosition = (getAnchor(target) and getAnchor(target).Position) or nil,
+    }
+end
+
+function TargetManager:IsValid(target, targetType)
+    if not target or not target.Parent then return false end
+    local anchor = getAnchor(target)
+    if not anchor or not anchor.Parent then return false end
+    if targetType == "SPIRIT" and not isTierAllowed(target) then return false end
+    if targetType == "ORB" then
+        local folder = ensureOrbsFolder()
+        if not folder or not target:IsDescendantOf(folder) then return false end
+    elseif targetType == "SPIRIT" then
+        if not Spirits or not Spirits.Parent or not target:IsDescendantOf(Spirits) then return false end
+    end
+    return true
+end
+
+function TargetManager:Validate()
+    if State.autoOrb and State.currentOrb and not self:IsValid(State.currentOrb, "ORB") then
+        self.Memory[State.currentOrb] = nil
+        State.currentOrb = nil
+        State.stuckTime = 0
+        State.stuckCheckPosition = nil
+        logActivity("TARGET", "Orb target invalidated; rescan requested.")
+    end
+
+    if State.autoSpirit and State.currentSpirit and not self:IsValid(State.currentSpirit, "SPIRIT") then
+        self.Memory[State.currentSpirit] = nil
+        State.currentSpirit = nil
+        State.stuckTime = 0
+        State.stuckCheckPosition = nil
+        logActivity("TARGET", "Spirit target invalidated; rescan requested.")
+    end
+end
+
+function TargetManager:Refresh(reason)
+    refreshAllInTargets()
+    self.LastRefresh = os.clock()
+    self.ScanCount += 1
+    logActivity("TARGET", "Orb/Spirit targets refreshed (" .. tostring(reason or "scheduled") .. ").")
+end
+
+function TargetManager:Step()
+    if State.unloaded then return end
+    local now = os.clock()
+
+    if now - self.LastValidation >= self.ValidationInterval then
+        self.LastValidation = now
+        self:Validate()
+    end
+
+    local searching = State.autoOrb or State.autoSpirit
+        or (StateAllIn.autoAllInToggle and StateAllIn.mode == "SEARCHING")
+
+    if searching and now - self.LastRefresh >= self.RefreshInterval then
+        self:Refresh("60-second interval")
+    end
+end
+
+local Scheduler = {
+    Current = "IDLE",
+    LastChange = 0,
+    Priority = {
+        STOP_ALL = 100,
+        ALL_IN = 90,
+        FARM = 70,
+        ORB = 50,
+        SPIRIT = 40,
+        IDLE = 0,
+    },
+}
+
+function Scheduler:Resolve()
+    if StateAllIn.autoAllInToggle then return "ALL_IN" end
+    if StateFarm.autoFarmToggle then return "FARM" end
+    if State.autoOrb then return "ORB" end
+    if State.autoSpirit then return "SPIRIT" end
+    return "IDLE"
+end
+
+function Scheduler:Step()
+    if State.unloaded then return end
+    local requested = self:Resolve()
+
+    if requested ~= self.Current then
+        local previous = self.Current
+        self.Current = requested
+        self.LastChange = os.clock()
+        logActivity("SCHEDULER", previous .. " -> " .. requested)
+    end
+    MovementLock:Acquire(requested)
+
+    if requested == "ALL_IN" then
+        if StateAllIn.mode == "FARMING" then
+            State.autoOrb = false
+            State.autoSpirit = false
+            StateFarm.autoFarmToggle = true
+        elseif StateAllIn.mode == "SEARCHING" then
+            StateFarm.autoFarmToggle = false
+            if StateAllIn.searchType == "ORB" then
+                State.autoOrb = true
+                State.autoSpirit = false
+            else
+                State.autoOrb = false
+                State.autoSpirit = true
+            end
+        end
+    elseif requested == "FARM" then
+        State.autoOrb = false
+        State.autoSpirit = false
+        StateAllIn.autoAllInToggle = false
+        StateAllIn.mode = "IDLE"
+    elseif requested == "ORB" then
+        State.autoSpirit = false
+        StateFarm.autoFarmToggle = false
+        StateAllIn.autoAllInToggle = false
+        StateAllIn.mode = "IDLE"
+    elseif requested == "SPIRIT" then
+        State.autoOrb = false
+        StateFarm.autoFarmToggle = false
+        StateAllIn.autoAllInToggle = false
+        StateAllIn.mode = "IDLE"
+    end
+end
+
+local Watchdog = {
+    Interval = 2,
+    LastCheck = 0,
+    MissingCharacterSince = nil,
+    LastProgressAt = os.clock(),
+    LastPosition = nil,
+    RecoveryCount = 0,
+}
+
+function Watchdog:Step()
+    if State.unloaded then return end
+    local now = os.clock()
+    if now - self.LastCheck < self.Interval then return end
+    self.LastCheck = now
+
+    local active = Scheduler.Current ~= "IDLE"
+    if not active then
+        self.MissingCharacterSince = nil
+        self.LastPosition = nil
+        self.LastProgressAt = now
+        return
+    end
+
+    local root = getRoot()
+    local humanoid = getHumanoid()
+    if not root or not humanoid or humanoid.Health <= 0 then
+        self.MissingCharacterSince = self.MissingCharacterSince or now
+        if now - self.MissingCharacterSince >= 20 then
+            logActivity("WATCHDOG", "Character unavailable for 20 seconds; automation remains paused.")
+            self.MissingCharacterSince = now
+        end
+        return
+    end
+    self.MissingCharacterSince = nil
+
+    if not self.LastPosition then
+        self.LastPosition = root.Position
+        self.LastProgressAt = now
+        return
+    end
+
+    local moved = (root.Position - self.LastPosition).Magnitude
+    if moved >= CONFIG.StuckMinMovement then
+        self.LastProgressAt = now
+    end
+    self.LastPosition = root.Position
+
+    local searching = State.autoOrb or State.autoSpirit
+    if searching and (State.currentOrb or State.currentSpirit) then
+        local target = State.currentOrb or State.currentSpirit
+        local targetType = State.currentOrb and "ORB" or "SPIRIT"
+        if not TargetManager:IsValid(target, targetType) then
+            if targetType == "ORB" then State.currentOrb = nil else State.currentSpirit = nil end
+            self.LastProgressAt = now
+            logActivity("WATCHDOG", "Invalid target cleared; scanner will reacquire.")
+            return
+        end
+
+        if now - self.LastProgressAt >= 18 then
+            if targetType == "ORB" then
+                State.blockedOrbs[target] = now + CONFIG.OrbBlockedTime
+                State.currentOrb = nil
+            else
+                State.currentSpirit = nil
+            end
+            resetMovement()
+            self.LastProgressAt = now
+            self.RecoveryCount += 1
+            logActivity("WATCHDOG", "No movement progress; target released for recovery #" .. self.RecoveryCount .. ".")
+        end
+    end
+end
+
+ModuleManager:Register("EventManager", EventManager)
+ModuleManager:Register("ErrorHandler", ErrorHandler)
+ModuleManager:Register("MovementLock", MovementLock)
+ModuleManager:Register("TargetManager", TargetManager)
+ModuleManager:Register("Scheduler", Scheduler)
+ModuleManager:Register("Watchdog", Watchdog)
+
+local function updateMonitorUI()
+    if State.unloaded then return end
+    if schedulerStatusParagraph then
+        pcall(function()
+            schedulerStatusParagraph:SetDesc(
+                T("OwnerLabel") .. ": " .. Scheduler.Current
+                .. " | " .. T("TargetRefreshLabel") .. ": " .. tostring(math.max(0, math.ceil(TargetManager.RefreshInterval - (os.clock() - TargetManager.LastRefresh))) .. "s")
+                .. " | " .. T("RecoveriesLabel") .. ": " .. tostring(Watchdog.RecoveryCount)
+            )
+        end)
+    end
+    if activityLogParagraph then
+        pcall(function()
+            activityLogParagraph:SetDesc(getActivityLogText(18))
+        end)
+    end
+    local humanoid = getHumanoid()
+    local root = getRoot()
+    local health = humanoid and math.floor(humanoid.Health) or 0
+    local maxHealth = humanoid and math.floor(humanoid.MaxHealth) or 0
+    local position = root and string.format("%.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z) or "Unavailable"
+    if homeProfileParagraph then
+        pcall(function()
+            homeProfileParagraph:SetDesc(
+                LocalPlayer.Name .. " | " .. T("HealthLabel") .. ": " .. health .. "/" .. maxHealth
+                .. " | " .. T("PositionLabel") .. ": " .. position
+            )
+        end)
+    end
+    if homeStatusParagraph then
+        pcall(function()
+            homeStatusParagraph:SetDesc(
+                T("SchedulerShort") .. ": " .. Scheduler.Current
+                .. " | " .. T("EnergyLabel") .. ": " .. tostring(getEnergy())
+                .. " | " .. T("RecoveriesLabel") .. ": " .. tostring(Watchdog.RecoveryCount)
+            )
+        end)
+    end
+    if targetStatusParagraph then
+        local orbName = State.currentOrb and State.currentOrb.Name or T("None")
+        local spiritName = State.currentSpirit and State.currentSpirit.Name or T("None")
+        pcall(function()
+            targetStatusParagraph:SetDesc(
+                T("ScansLabel") .. ": " .. tostring(TargetManager.ScanCount)
+                .. " | " .. T("OrbLabel") .. ": " .. orbName
+                .. " | " .. T("SpiritLabel") .. ": " .. spiritName
+                .. " | " .. T("MemoryLabel") .. ": " .. tostring((function() local n = 0 for _ in pairs(TargetManager.Memory) do n += 1 end return n end)())
+            )
+        end)
+    end
+end
+
+local function stopAllAutomation(reason)
+    if State.unloaded and reason ~= "unload" then return end
+
+    State.autoSpirit = false
+    State.autoOrb = false
+    StateFarm.autoFarmToggle = false
+    StateFarm.busy = false
+    StateAllIn.autoAllInToggle = false
+    StateAllIn.mode = "IDLE"
+    StateAllIn.searchType = "ORB"
+    State.autoNoClip = false
+    State.manualNoClip = false
+    State.antiAFK = false
+
+    setSpeedBoost(false)
+    setFPSBoost(false)
+    if setNoClip then setNoClip(false) end
+    resetMovement()
+    resetFarmState()
+
+    local humanoid = getHumanoid()
+    local root = getRoot()
+    if humanoid and root then
+        pcall(function() humanoid:MoveTo(root.Position) end)
+    end
+
+    Scheduler.Current = "IDLE"
+    Scheduler.LastChange = os.clock()
+    MovementLock:Acquire("IDLE")
+    syncAutoToggleUI(nil)
+
+    if antiAFKToggle then pcall(function() antiAFKToggle:SetValue(false) end) end
+    if manualNoClipToggle then pcall(function() manualNoClipToggle:SetValue(false) end) end
+    if speedBoostToggle then pcall(function() speedBoostToggle:SetValue(false) end) end
+    if fpsBoostToggle then pcall(function() fpsBoostToggle:SetValue(false) end) end
+    syncSettingToggleUI()
+
+    logActivity("CONTROL", "STOP ALL executed" .. (reason and (": " .. tostring(reason)) or "."))
+    updateAllInStatusUI()
+    updateMonitorUI()
+end
+
+updateAllInStatusUI = function()
     if State.unloaded or not allInStatusParagraph then return end
     local energy = getEnergy()
     local elapsed = math.max(0, os.clock() - StateAllIn.timerStart)
@@ -978,28 +1675,28 @@ local function updateAllInStatusUI()
     local text
     if not StateAllIn.autoAllInToggle then
         text = string.format(
-            "Status: OFF | Energi: %d (Cari < %d, Farm >= %d)",
+            T("StatusOff"),
             energy,
             CONFIG_ALLIN.MinEnergyThreshold,
             CONFIG_ALLIN.TargetEnergy
         )
     elseif StateAllIn.mode == "FARMING" then
         text = string.format(
-            "Mode: AUTO FARM | Energi: %d / %d (Cari lagi jika < %d)",
+            T("AllInFarmingStatus"),
             energy,
             CONFIG_ALLIN.TargetEnergy,
             CONFIG_ALLIN.MinEnergyThreshold
         )
     elseif StateAllIn.mode == "SEARCHING" then
         text = string.format(
-            "Mode: CARI %s | Energi: %d / %d | Refresh/Switch: %ds",
+            T("AllInSearchingStatus"),
             StateAllIn.searchType,
             energy,
             CONFIG_ALLIN.TargetEnergy,
             remaining
         )
     else
-        text = string.format("Mode: IDLE | Energi: %d", energy)
+        text = string.format(T("AllInIdleStatus"), energy)
     end
 
     pcall(function()
@@ -1021,6 +1718,7 @@ local function updateAutoAllIn()
 
             State.autoOrb = true
             State.autoSpirit = false
+            logActivity("AUTOMATION", "Auto Orb enabled")
             StateFarm.autoFarmToggle = false
 
             State.autoNoClip = true
@@ -1029,7 +1727,7 @@ local function updateAutoAllIn()
             notify(
                 "Auto All-In",
                 string.format(
-                    "Energi di bawah %d (%d). Mulai Cari Orb & Refresh tiap %ds.",
+                    T("AllInLowEnergy"),
                     CONFIG_ALLIN.MinEnergyThreshold,
                     currentEnergy,
                     CONFIG_ALLIN.SwitchInterval
@@ -1060,7 +1758,7 @@ local function updateAutoAllIn()
             resetMovement()
             notify(
                 "Auto All-In",
-                string.format("Target %d Energi tercapai! Kembali ke Auto Farm.", CONFIG_ALLIN.TargetEnergy)
+                string.format(T("AllInReached"), CONFIG_ALLIN.TargetEnergy)
             )
         elseif now - StateAllIn.timerStart >= CONFIG_ALLIN.SwitchInterval then
             StateAllIn.timerStart = now
@@ -1072,7 +1770,7 @@ local function updateAutoAllIn()
                 State.autoSpirit = true
                 notify(
                     "Auto All-In",
-                    string.format("Interval %ds: Refresh Orb & Spirit -> Beralih ke Cari Spirit.", CONFIG_ALLIN.SwitchInterval)
+                    string.format(T("AllInSwitchSpirit"), CONFIG_ALLIN.SwitchInterval)
                 )
             else
                 StateAllIn.searchType = "ORB"
@@ -1080,7 +1778,7 @@ local function updateAutoAllIn()
                 State.autoSpirit = false
                 notify(
                     "Auto All-In",
-                    string.format("Interval %ds: Refresh Orb & Spirit -> Beralih ke Cari Orb.", CONFIG_ALLIN.SwitchInterval)
+                    string.format(T("AllInSwitchOrb"), CONFIG_ALLIN.SwitchInterval)
                 )
             end
         end
@@ -1117,8 +1815,10 @@ setNoClip = function(enabled)
     end
 end
 
-local function setFPSBoost(enabled)
+setFPSBoost = function(enabled)
     State.fpsBoost = enabled
+    scheduleConfigSave()
+    logActivity("SETTING", "FPS boost " .. (enabled and "enabled" or "disabled"))
     if enabled then
         if State.originalLighting.GlobalShadows == nil then
             State.originalLighting.GlobalShadows = Lighting.GlobalShadows
@@ -1170,288 +1870,399 @@ local function serverHop()
     end
 end
 
--- =========================================================
--- DIMENSIUI WINDOW & UI SETUP
--- =========================================================
+local function selectedTiers()
+    local values = {}
+    for _, tier in ipairs({"MYTHIC", "EPIC", "RARE", "UNCOMMON", "COMMON"}) do
+        if TierFilter[tier] then table.insert(values, tier) end
+    end
+    return values
+end
 
-local Window = DimensiUI:CreateWindow({
-    Title = "SPIRITS HUNTER HUB",
-    SubTitle = "Ultimate Edition | telatnakal",
-    Theme = "Dimensi",
-    Size = UDim2.fromOffset(500, 380),
-    TabWidth = 150,
-    Acrylic = false,
-    MinimizeKey = Enum.KeyCode.RightControl,
-})
+syncSettingToggleUI = function()
+    syncingSettingToggles = true
+    pcall(function() if playerESPToggle then playerESPToggle:SetValue(State.playerESP) end end)
+    pcall(function() if spiritESPToggle then spiritESPToggle:SetValue(State.spiritESP) end end)
+    pcall(function() if speedBoostToggle then speedBoostToggle:SetValue(State.speedBoost) end end)
+    pcall(function() if manualNoClipToggle then manualNoClipToggle:SetValue(State.manualNoClip) end end)
+    pcall(function() if fpsBoostToggle then fpsBoostToggle:SetValue(State.fpsBoost) end end)
+    pcall(function() if antiAFKToggle then antiAFKToggle:SetValue(State.antiAFK) end end)
+    syncingSettingToggles = false
+end
 
-local EspTab = Window:AddTab({ Title = "ESP", Icon = "eye" })
-local MovementTab = Window:AddTab({ Title = "Movement", Icon = "move" })
-local AutoFarmTab = Window:AddTab({ Title = "Auto Farm", Icon = "sprout" })
-local SmartTab = Window:AddTab({ Title = "Misc", Icon = "brain" })
-local SettingsTab = Window:AddTab({ Title = "Settings", Icon = "settings" })
+buildUI = function()
+    syncingAutoToggles = true
+    syncingSettingToggles = true
 
-Window:SelectTab(1)
+    if Window then
+        pcall(function() DimensiUI:Destroy() end)
+        DimensiUI = loadDimensiUI()
+    end
 
--- ESP TAB
-local PlayerESPSection = EspTab:AddSection("Player ESP")
-PlayerESPSection:AddToggle("Toggle1", {
-    Title = "Player ESP",
-    Default = State.playerESP,
-    Callback = function(value)
-        State.playerESP = value
-        if not value then
-            for targetPlayer in pairs(PlayerCache) do destroyPlayerESP(targetPlayer) end
-        else
-            updatePlayerESP()
-        end
-    end,
-})
+    Window = DimensiUI:CreateWindow({
+        Title = "DIMENSI-HUB | BLOOM | V.1.0.1 | telatnakal",
+        SubTitle = "",
+        Theme = "Dimensi",
+        Size = UDim2.fromOffset(590, 470),
+        TabWidth = 138,
+        Acrylic = false,
+        MinimizeKey = Enum.KeyCode.RightControl,
+    })
 
-local SpiritESPSection = EspTab:AddSection("Spirit ESP")
-SpiritESPSection:AddToggle("Toggle2", {
-    Title = "Spirit ESP",
-    Default = State.spiritESP,
-    Callback = function(value)
-        State.spiritESP = value
-        if not value then
-            for object in pairs(SpiritCache) do destroySpiritESP(object) end
-        else
-            updateSpiritESP()
-        end
-    end,
-})
+    local HomeTab = Window:AddTab({ Title = T("Home"), Icon = "home" })
+    local FarmingTab = Window:AddTab({ Title = T("Farming"), Icon = "sprout" })
+    local VisualTab = Window:AddTab({ Title = T("Visual"), Icon = "eye" })
+    local MiscTab = Window:AddTab({ Title = T("Misc"), Icon = "settings" })
+    local AboutTab = Window:AddTab({ Title = T("About"), Icon = "info" })
 
-SpiritESPSection:AddDropdown("Dropdown1", {
-    Title = "Spirit Tier Filter",
-    Values = { "MYTHIC", "EPIC", "RARE", "UNCOMMON", "COMMON" },
-    Default = { "MYTHIC", "EPIC", "RARE" },
-    Multi = true,
-    AllowNone = true,
-    Callback = function(values)
-        table.clear(TierFilter)
-        if type(values) == "table" then
-            for key, value in pairs(values) do
-                if type(key) == "number" and type(value) == "string" then
-                    TierFilter[string.upper(value)] = true
-                elseif value == true and type(key) == "string" then
-                    TierFilter[string.upper(key)] = true
+    local CharacterSection = HomeTab:AddSection(T("CharacterProfile"))
+    homeProfileParagraph = CharacterSection:AddParagraph({
+        Title = T("PlayerLabel"),
+        Content = LocalPlayer.Name .. " | " .. T("LoadingCharacter"),
+    })
+    local OverviewSection = HomeTab:AddSection(T("SystemOverview"))
+    homeStatusParagraph = OverviewSection:AddParagraph({
+        Title = T("SystemStatusLabel"),
+        Content = T("SchedulerShort") .. ": IDLE | " .. T("EnergyLabel") .. ": 0",
+    })
+    targetStatusParagraph = OverviewSection:AddParagraph({
+        Title = T("ScannerStatusLabel"),
+        Content = T("ScansLabel") .. ": 0 | " .. T("OrbLabel") .. ": " .. T("None") .. " | " .. T("SpiritLabel") .. ": " .. T("None"),
+    })
+    local MonitorSection = HomeTab:AddSection(T("SchedulerLabel"))
+    schedulerStatusParagraph = MonitorSection:AddParagraph({
+        Title = T("SchedulerLabel"), Content = T("OwnerLabel") .. ": IDLE",
+    })
+    activityLogParagraph = MonitorSection:AddParagraph({
+        Title = T("ActivityLogLabel"), Content = T("NoActivity"),
+    })
+
+    local FarmSection = FarmingTab:AddSection(T("PotManagement"))
+    farmToggle = FarmSection:AddToggle("AutoFarm", {
+        Title = T("AutoFarmLabel"), Default = StateFarm.autoFarmToggle,
+        Callback = function(value)
+            if syncingAutoToggles or State.unloaded then return end
+            StateFarm.autoFarmToggle = value
+            scheduleConfigSave()
+            resetFarmState()
+            logActivity("AUTOMATION", "Auto Farm " .. (value and "enabled" or "disabled"))
+            if value then
+                StateAllIn.autoAllInToggle = false
+                StateAllIn.mode = "IDLE"
+                State.autoSpirit, State.autoOrb = false, false
+                syncAutoToggleUI("Farm")
+                State.autoNoClip = true
+                setNoClip(true)
+                resetMovement()
+                updateAllInStatusUI()
+                notify(T("AutoFarm"), T("NotifyFarmOn"))
+            else
+                State.autoNoClip = State.autoSpirit or State.autoOrb
+                setNoClip(State.autoNoClip or State.manualNoClip)
+                local humanoid, root = getHumanoid(), getRoot()
+                if humanoid and root and not State.autoSpirit and not State.autoOrb then humanoid:MoveTo(root.Position) end
+                updateAllInStatusUI()
+                notify(T("AutoFarm"), T("NotifyFarmOff"))
+            end
+        end,
+    })
+
+    local OrbSpiritSection = FarmingTab:AddSection(T("OrbSpiritSection"))
+    orbToggle = OrbSpiritSection:AddToggle("AutoOrb", {
+        Title = T("AutoOrbLabel"), Default = State.autoOrb,
+        Callback = function(value)
+            if syncingAutoToggles or State.unloaded then return end
+            State.autoOrb = value
+            scheduleConfigSave()
+            if value then
+                StateAllIn.autoAllInToggle = false
+                StateAllIn.mode = "IDLE"
+                State.autoSpirit = false
+                StateFarm.autoFarmToggle = false
+                syncAutoToggleUI("Orb")
+                State.autoNoClip = true
+                setNoClip(true)
+                resetMovement()
+                updateAllInStatusUI()
+                notify(T("Orb"), T("NotifyOrbOn"))
+            else
+                State.autoNoClip = State.autoSpirit or StateFarm.autoFarmToggle
+                setNoClip(State.autoNoClip or State.manualNoClip)
+                if not State.autoSpirit and not StateFarm.autoFarmToggle then stopMovement() end
+                updateAllInStatusUI()
+                notify(T("Orb"), T("NotifyOrbOff"))
+            end
+        end,
+    })
+    spiritToggle = OrbSpiritSection:AddToggle("AutoSpirit", {
+        Title = T("AutoSpiritLabel"), Default = State.autoSpirit,
+        Callback = function(value)
+            if syncingAutoToggles or State.unloaded then return end
+            State.autoSpirit = value
+            scheduleConfigSave()
+            if value then
+                StateAllIn.autoAllInToggle = false
+                StateAllIn.mode = "IDLE"
+                State.autoOrb = false
+                StateFarm.autoFarmToggle = false
+                syncAutoToggleUI("Spirit")
+                State.autoNoClip = true
+                setNoClip(true)
+                resetMovement()
+                updateAllInStatusUI()
+                notify(T("Spirit"), T("NotifySpiritOn"))
+            else
+                State.autoNoClip = State.autoOrb or StateFarm.autoFarmToggle
+                setNoClip(State.autoNoClip or State.manualNoClip)
+                if not State.autoOrb and not StateFarm.autoFarmToggle then stopMovement() end
+                updateAllInStatusUI()
+                notify(T("Spirit"), T("NotifySpiritOff"))
+            end
+        end,
+    })
+    local AllInSection = FarmingTab:AddSection(T("AllInSection"))
+    allInToggle = AllInSection:AddToggle("AutoAllIn", {
+        Title = T("AutoAllInLabel"), Default = StateAllIn.autoAllInToggle,
+        Callback = function(value)
+            if syncingAutoToggles or State.unloaded then return end
+            StateAllIn.autoAllInToggle = value
+            scheduleConfigSave()
+            logActivity("AUTOMATION", "Auto All-In " .. (value and "enabled" or "disabled"))
+            if value then
+                StateAllIn.mode = "IDLE"
+                StateAllIn.timerStart = os.clock()
+                State.autoOrb, State.autoSpirit, StateFarm.autoFarmToggle = false, false, false
+                syncAutoToggleUI("AllIn")
+                ErrorHandler.Run("AutoAllIn", updateAutoAllIn)
+                notify(T("AutoAllIn"), T("NotifyAllInOn"))
+            else
+                StateAllIn.mode = "IDLE"
+                State.autoOrb, State.autoSpirit, StateFarm.autoFarmToggle = false, false, false
+                syncAutoToggleUI(nil)
+                stopMovement()
+                updateAllInStatusUI()
+                notify(T("AutoAllIn"), T("NotifyAllInOff"))
+            end
+        end,
+    })
+    allInStatusParagraph = AllInSection:AddParagraph({
+        Title = T("AutoAllInStatus"), Content = T("StatusOff"):format(getEnergy(), CONFIG_ALLIN.MinEnergyThreshold, CONFIG_ALLIN.TargetEnergy),
+    })
+
+    local PlayerESPSection = VisualTab:AddSection(T("PlayerESPSection"))
+    playerESPToggle = PlayerESPSection:AddToggle("PlayerESP", {
+        Title = T("PlayerESPLabel"), Default = State.playerESP,
+        Callback = function(value)
+            if syncingSettingToggles or State.unloaded then return end
+            State.playerESP = value
+            scheduleConfigSave()
+            if not value then
+                for targetPlayer in pairs(PlayerCache) do destroyPlayerESP(targetPlayer) end
+            else
+                updatePlayerESP()
+            end
+        end,
+    })
+    local SpiritESPSection = VisualTab:AddSection(T("SpiritESPSection"))
+    spiritESPToggle = SpiritESPSection:AddToggle("SpiritESP", {
+        Title = T("SpiritESPLabel"), Default = State.spiritESP,
+        Callback = function(value)
+            if syncingSettingToggles or State.unloaded then return end
+            State.spiritESP = value
+            scheduleConfigSave()
+            if not value then
+                for object in pairs(SpiritCache) do destroySpiritESP(object) end
+            else
+                updateSpiritESP()
+            end
+        end,
+    })
+    SpiritESPSection:AddDropdown("SpiritTierFilter", {
+        Title = T("SpiritTierLabel"),
+        Values = { "MYTHIC", "EPIC", "RARE", "UNCOMMON", "COMMON" },
+        Default = selectedTiers(), Multi = true, AllowNull = true,
+        Callback = function(values)
+            table.clear(TierFilter)
+            if type(values) == "table" then
+                for key, value in pairs(values) do
+                    if type(key) == "number" and type(value) == "string" then
+                        TierFilter[string.upper(value)] = true
+                    elseif value == true and type(key) == "string" then
+                        TierFilter[string.upper(key)] = true
+                    end
                 end
+            elseif type(values) == "string" then
+                TierFilter[string.upper(values)] = true
             end
-        elseif type(values) == "string" then
-            TierFilter[string.upper(values)] = true
-        end
-        if State.currentSpirit and not isTierAllowed(State.currentSpirit) then
-            State.currentSpirit = nil
-            State.stuckTime = 0
-        end
-        updateSpiritESP()
-    end,
-})
+            if State.currentSpirit and not isTierAllowed(State.currentSpirit) then
+                State.currentSpirit = nil
+                State.stuckTime = 0
+            end
+            updateSpiritESP()
+            scheduleConfigSave()
+        end,
+    })
 
--- AUTO FARM TAB
-AutoFarmTab:AddSection("Pot Management")
+    local CharacterSettings = MiscTab:AddSection(T("CharacterSection"))
+    speedBoostToggle = CharacterSettings:AddToggle("SpeedBoost", {
+        Title = T("SpeedBoostLabel") .. " (35)", Default = State.speedBoost,
+        Callback = function(value) if not syncingSettingToggles then setSpeedBoost(value) end end,
+    })
+    manualNoClipToggle = CharacterSettings:AddToggle("ManualNoClip", {
+        Title = T("NoclipLabel"), Default = State.manualNoClip,
+        Callback = function(value)
+            if syncingSettingToggles then return end
+            State.manualNoClip = value
+            scheduleConfigSave()
+            logActivity("SETTING", "Manual noclip " .. (value and "enabled" or "disabled"))
+            setNoClip(value or State.autoNoClip)
+        end,
+    })
+    local PerformanceSection = MiscTab:AddSection(T("PerformanceSection"))
+    fpsBoostToggle = PerformanceSection:AddToggle("FPSBoost", {
+        Title = T("FPSBoostLabel"), Default = State.fpsBoost,
+        Callback = function(value) if not syncingSettingToggles then setFPSBoost(value) end end,
+    })
+    antiAFKToggle = PerformanceSection:AddToggle("AntiAFK", {
+        Title = T("AntiAFKLabel"), Default = State.antiAFK,
+        Callback = function(value)
+            if syncingSettingToggles then return end
+            State.antiAFK = value
+            scheduleConfigSave()
+            logActivity("SETTING", "Anti-AFK " .. (value and "enabled" or "disabled"))
+        end,
+    })
+    local SessionSection = MiscTab:AddSection(T("SessionSection"))
+    SessionSection:AddButton({ Title = T("ServerHopLabel"), Description = "", Callback = serverHop })
+    SessionSection:AddButton({
+        Title = T("RejoinLabel"), Description = "",
+        Callback = function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end,
+    })
+    local ConfigurationSection = MiscTab:AddSection(T("Configuration"))
+    ConfigurationSection:AddDropdown("Language", {
+        Title = T("Language"), Values = { "EN", "ID" },
+        Default = string.upper(ConfigLanguage), AllowNull = false,
+        Callback = function(value) if setLanguage then setLanguage(value) end end,
+    })
+    ConfigurationSection:AddButton({
+        Title = T("ResetConfigLabel"), Description = "",
+        Callback = function()
+            stopAllAutomation("configuration reset")
+            resetConfigData()
+            setSpeedBoost(false)
+            setFPSBoost(false)
+            setNoClip(false)
+            State.manualNoClip = false
+            State.antiAFK = false
+            State.playerESP = false
+            State.spiritESP = false
+            State.autoNoClip = false
+            for targetPlayer in pairs(PlayerCache) do destroyPlayerESP(targetPlayer) end
+            for object in pairs(SpiritCache) do destroySpiritESP(object) end
+            resetMovement()
+            resetFarmState()
+            if TargetManager then
+                table.clear(TargetManager.Memory)
+                TargetManager.LastRefresh = 0
+            end
+            syncAutoToggleUI(nil)
+            syncSettingToggleUI()
+            updatePlayerESP()
+            updateSpiritESP()
+            updateMonitorUI()
+            ConfigDirty = true
+            saveConfig()
+            notify(T("ConfigurationTitle"), T("NotifyReset"))
+            task.defer(buildUI)
+        end,
+    })
+    local HubControlsSection = MiscTab:AddSection(T("HubControlsLabel"))
+    HubControlsSection:AddButton({
+        Title = T("StopAllLabel"), Description = "",
+        Callback = function() stopAllAutomation("manual request") end,
+    })
+    HubControlsSection:AddButton({
+        Title = T("UnloadLabel"), Description = "",
+        Callback = function() if unloadHub then unloadHub() end end,
+    })
 
-farmToggle = AutoFarmTab:AddToggle("Toggle3", {
-    Title = "Auto Farm Pots",
-    Value = false,
-    Callback = function(value)
-        if syncingAutoToggles or State.unloaded then return end
-        StateFarm.autoFarmToggle = value
+    local AboutSection = AboutTab:AddSection(T("About"))
+    AboutSection:AddParagraph({
+        Title = "DIMENSI-HUB | BLOOM", Content = T("AboutDescription"),
+    })
+
+    Window:SelectTab(1)
+    syncingAutoToggles = false
+    syncingSettingToggles = false
+end
+
+onModuleError = function(moduleName)
+    if moduleName == "Movement" then
+        stopAllAutomation("movement error")
+        return
+    elseif moduleName == "AutoFarm" then
+        StateFarm.autoFarmToggle = false
+        StateFarm.busy = false
         resetFarmState()
+    elseif moduleName == "AutoAllIn" then
+        StateAllIn.autoAllInToggle = false
+        StateAllIn.mode = "IDLE"
+        State.autoOrb = false
+        State.autoSpirit = false
+        StateFarm.autoFarmToggle = false
+        resetMovement()
+    else
+        return
+    end
 
-        if value then
-            StateAllIn.autoAllInToggle = false
-            StateAllIn.mode = "IDLE"
-            State.autoSpirit = false
-            State.autoOrb = false
-            syncAutoToggleUI("Farm")
+    State.autoNoClip = State.autoOrb or State.autoSpirit or StateFarm.autoFarmToggle
+    setNoClip(State.autoNoClip or State.manualNoClip)
+    syncAutoToggleUI(StateAllIn.autoAllInToggle and "AllIn" or StateFarm.autoFarmToggle and "Farm" or State.autoOrb and "Orb" or State.autoSpirit and "Spirit" or nil)
+    scheduleConfigSave()
+    updateAllInStatusUI()
+    updateMonitorUI()
+end
+
+setLanguage = function(value)
+    local language = string.lower(tostring(value or "en"))
+    if language ~= "id" then language = "en" end
+    if ConfigLanguage == language then return end
+    ConfigLanguage = language
+    scheduleConfigSave()
+    logActivity("SETTING", "Language changed to " .. string.upper(language))
+    task.defer(buildUI)
+end
+
+buildUI()
+ConfigReady = true
+
+if ConfigLoaded then
+    task.defer(function()
+        if State.unloaded then return end
+        if State.speedBoost then setSpeedBoost(true) end
+        if State.fpsBoost then setFPSBoost(true) end
+        if State.manualNoClip then setNoClip(true) end
+        if State.playerESP then updatePlayerESP() end
+        if State.spiritESP then updateSpiritESP() end
+        if StateFarm.autoFarmToggle or State.autoOrb or State.autoSpirit then
             State.autoNoClip = true
             setNoClip(true)
+            resetFarmState()
             resetMovement()
-            updateAllInStatusUI()
-            notify("Auto Farm", "Auto Farm Pots: ON")
-        else
-            State.autoNoClip = State.autoSpirit or State.autoOrb
-            setNoClip(State.autoNoClip or State.manualNoClip)
-            local humanoid = getHumanoid()
-            local root = getRoot()
-            if humanoid and root and not State.autoSpirit and not State.autoOrb then
-                humanoid:MoveTo(root.Position)
-            end
-            updateAllInStatusUI()
-            notify("Auto Farm", "Auto Farm Pots: OFF")
-        end
-    end,
-})
-
-local AutomationSection = AutoFarmTab:AddSection("Automation")
-orbToggle = AutomationSection:AddToggle("Toggle4", {
-    Title = "Auto Collect Orbs",
-    Value = false,
-    Callback = function(value)
-        if syncingAutoToggles or State.unloaded then return end
-        if value then
-            StateAllIn.autoAllInToggle = false
-            StateAllIn.mode = "IDLE"
-            State.autoOrb = true
-            State.autoSpirit = false
-            StateFarm.autoFarmToggle = false
-            syncAutoToggleUI("Orb")
-            State.autoNoClip = true
-            setNoClip(true)
-            resetMovement()
-            updateAllInStatusUI()
-            notify("Orb", "Auto Collect Orbs Activated")
-        else
-            State.autoOrb = false
-            State.autoNoClip = State.autoSpirit or StateFarm.autoFarmToggle
-            setNoClip(State.autoNoClip or State.manualNoClip)
-            if not State.autoSpirit and not StateFarm.autoFarmToggle then
-                stopMovement()
-            end
-            updateAllInStatusUI()
-            notify("Orb", "Auto Collect Orbs Stopped")
-        end
-    end,
-})
-
-spiritToggle = AutomationSection:AddToggle("Toggle5", {
-    Title = "Auto Hunt Spirits",
-    Value = false,
-    Callback = function(value)
-        if syncingAutoToggles or State.unloaded then return end
-        if value then
-            StateAllIn.autoAllInToggle = false
-            StateAllIn.mode = "IDLE"
-            State.autoSpirit = true
-            State.autoOrb = false
-            StateFarm.autoFarmToggle = false
-            syncAutoToggleUI("Spirit")
-            State.autoNoClip = true
-            setNoClip(true)
-            resetMovement()
-            updateAllInStatusUI()
-            notify("Spirit", "Auto Hunt Spirits Activated")
-        else
-            State.autoSpirit = false
-            State.autoNoClip = State.autoOrb or StateFarm.autoFarmToggle
-            setNoClip(State.autoNoClip or State.manualNoClip)
-            if not State.autoOrb and not StateFarm.autoFarmToggle then
-                stopMovement()
-            end
-            updateAllInStatusUI()
-            notify("Spirit", "Auto Hunt Spirits Stopped")
-        end
-    end,
-})
-
-local AllInSection = AutoFarmTab:AddSection("Auto All-In System")
-allInToggle = AllInSection:AddToggle("Toggle6", {
-    Title = "Auto All-In (Energy Loop)",
-    Value = false,
-    Callback = function(value)
-        if syncingAutoToggles or State.unloaded then return end
-        StateAllIn.autoAllInToggle = value
-        if value then
+        elseif StateAllIn.autoAllInToggle then
             StateAllIn.mode = "IDLE"
             StateAllIn.timerStart = os.clock()
-            State.autoOrb = false
-            State.autoSpirit = false
-            StateFarm.autoFarmToggle = false
-            syncAutoToggleUI("AllIn")
-            updateAutoAllIn()
-            notify("Auto All-In", "Fitur Auto All-In diaktifkan.")
-        else
-            StateAllIn.mode = "IDLE"
-            State.autoOrb = false
-            State.autoSpirit = false
-            StateFarm.autoFarmToggle = false
-            syncAutoToggleUI(nil)
-            stopMovement()
-            updateAllInStatusUI()
-            notify("Auto All-In", "Fitur Auto All-In dimatikan.")
+            ErrorHandler.Run("AutoAllIn", updateAutoAllIn)
         end
-    end,
-})
+        syncAutoToggleUI(StateAllIn.autoAllInToggle and "AllIn" or StateFarm.autoFarmToggle and "Farm" or State.autoOrb and "Orb" or State.autoSpirit and "Spirit" or nil)
+    end)
+end
 
-allInStatusParagraph = AllInSection:AddParagraph("Paragraph1", {
-    Title = "Auto All-In Status",
-    Content = "Status: OFF",
-})
-
--- MOVEMENT TAB
-local CharacterSection = MovementTab:AddSection("Character")
-CharacterSection:AddToggle("Toggle7", {
-    Title = "Speed Boost (35)",
-    Default = State.speedBoost,
-    Callback = setSpeedBoost,
-})
-CharacterSection:AddToggle("Toggle8", {
-    Title = "Noclip",
-    Default = State.manualNoClip,
-    Callback = function(value)
-        State.manualNoClip = value
-        setNoClip(value or State.autoNoClip)
-    end,
-})
-
--- MISC / SMART TAB
-local ControlsSection = SmartTab:AddSection("Controls")
-ControlsSection:AddButton("Button1", {
-    Title = "Stop All",
-    Icon = "square",
-    Callback = function()
-        stopMovement()
-        syncAutoToggleUI(nil)
-        updateAllInStatusUI()
-    end,
-})
-ControlsSection:AddButton("Button2", {
-    Title = "Reset Orb & Spirit Cache",
-    Icon = "refresh-ccw",
-    Callback = function()
-        refreshAllInTargets()
-        notify("Misc", "Orb & Spirit cache has been reset.")
-    end,
-})
-
--- SETTINGS TAB
-local PerformanceSection = SettingsTab:AddSection("Performance")
-PerformanceSection:AddToggle("Toggle9", {
-    Title = "FPS Boost",
-    Default = State.fpsBoost,
-    Callback = setFPSBoost,
-})
-PerformanceSection:AddToggle("Toggle10", {
-    Title = "Anti-AFK",
-    Default = State.antiAFK,
-    Callback = function(value)
-        State.antiAFK = value
-    end,
-})
-
-local SessionSection = SettingsTab:AddSection("Session")
-
-SessionSection:AddButton("Button3", {
-    Title = "Server Hop",
-    Icon = "globe",
-    Callback = function()
-        serverHop()
-    end,
-})
-
-SessionSection:AddButton("Button4", {
-    Title = "Rejoin Server",
-    Icon = "refresh-cw",
-    Callback = function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-    end,
-})
-
-local function unloadHub()
+unloadHub = function()
     if State.unloaded then return end
+    ConfigDirty = true
+    saveConfig()
+    stopAllAutomation("unload")
     State.unloaded = true
-
     stopMovement()
     State.manualNoClip = false
     State.autoNoClip = false
@@ -1459,38 +2270,26 @@ local function unloadHub()
     setSpeedBoost(false)
     setFPSBoost(false)
     State.antiAFK = false
-
-    for _, conn in ipairs(Connections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    table.clear(Connections)
-
+    EventManager:DisconnectAll()
     for targetPlayer in pairs(PlayerCache) do destroyPlayerESP(targetPlayer) end
     for object in pairs(SpiritCache) do destroySpiritESP(object) end
-
-    if ESPFolder then
-        pcall(function() ESPFolder:Destroy() end)
-    end
-
-    if Window then
-        pcall(function() Window:Destroy() end)
-    end
+    if ESPFolder then pcall(function() ESPFolder:Destroy() end) end
+  if Window then
+    pcall(function() Window:Destroy() end)
+    Window = nil
 end
 
-SessionSection:AddButton("Button5", {
-    Title = "Unload Hub",
-    Icon = "power",
-    Callback = unloadHub,
-})
-
--- =========================================================
--- LOOPS & EVENT CONNECTIONS
--- =========================================================
+if DimensiUI then
+    pcall(function() DimensiUI:Destroy() end)
+end
+end
 
 local espTimer = 0
 local movementTimer = 0
 local farmTimer = 0
 local allInTimer = 0
+local systemsTimer = 0
+local monitorTimer = 0
 
 trackConnection(RunService.Heartbeat:Connect(function(dt)
     if State.unloaded then return end
@@ -1507,6 +2306,8 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
     movementTimer += dt
     farmTimer += dt
     allInTimer += dt
+    systemsTimer += dt
+    monitorTimer += dt
 
     if espTimer >= 0.2 then
         espTimer = 0
@@ -1516,23 +2317,35 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 
     if movementTimer >= 0.05 then
         movementTimer = 0
-        updateMovement()
+        ErrorHandler.Run("Movement", updateMovement)
     end
 
     if farmTimer >= 0.1 then
         farmTimer = 0
         if StateFarm.autoFarmToggle then
-            updateAutoFarm()
+            ErrorHandler.Run("AutoFarm", updateAutoFarm)
         end
     end
 
     if allInTimer >= 1.0 then
         allInTimer = 0
         if StateAllIn.autoAllInToggle then
-            updateAutoAllIn()
+            ErrorHandler.Run("AutoAllIn", updateAutoAllIn)
         else
             updateAllInStatusUI()
         end
+    end
+
+    if systemsTimer >= 0.5 then
+        systemsTimer = 0
+        ErrorHandler.Run("Scheduler", Scheduler.Step, Scheduler)
+        ErrorHandler.Run("TargetManager", TargetManager.Step, TargetManager)
+        ErrorHandler.Run("Watchdog", Watchdog.Step, Watchdog)
+    end
+
+    if monitorTimer >= 2 then
+        monitorTimer = 0
+        updateMonitorUI()
     end
 end))
 
@@ -1620,6 +2433,8 @@ end))
 
 trackConnection(LocalPlayer.CharacterAdded:Connect(function(character)
     if State.unloaded then return end
+    MovementLock:Acquire("IDLE")
+    Scheduler.Current = "IDLE"
     watchSpeed(nil)
     resetFarmState()
     resetMovement()
@@ -1637,12 +2452,25 @@ trackConnection(LocalPlayer.CharacterAdded:Connect(function(character)
         end
         updatePlayerESP()
         updateSpiritESP()
+        if StateFarm.autoFarmToggle or State.autoOrb or State.autoSpirit or StateAllIn.autoAllInToggle then
+            State.autoNoClip = true
+            setNoClip(true)
+            resetFarmState()
+            resetMovement()
+            logActivity("RECOVERY", "Character ready; active automation resumed.")
+        end
     end)
 end))
+
+if State.speedBoost then setSpeedBoost(true) end
+if State.manualNoClip then setNoClip(true) end
+if State.fpsBoost then setFPSBoost(true) end
 
 updatePlayerESP()
 updateSpiritESP()
 updateAllInStatusUI()
+logActivity("SYSTEM", "Hub initialized with modular scheduler and watchdog.")
+updateMonitorUI()
 
-notify("SPIRITS HUNTER HUB", "Loaded successfully! Press RightControl to open/close UI.")
-print("SPIRITS HUNTER HUB ULTIMATE PRO LOADED")
+notify("DIMENSI-HUB | BLOOM", T("NotifyLoaded"))
+print("DIMENSI-HUB | BLOOM | V.1.0.1 | telatnakal")
